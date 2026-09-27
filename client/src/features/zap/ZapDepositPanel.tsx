@@ -7,13 +7,7 @@ import { zapDeposit } from "../../services/soroban";
 import type { DecodedContractPanic } from "../../../../shared/types/contractPanic";
 import type { TxPhase } from "../../services/transactionPhase";
 import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
-import {
-  describeZapQuoteVerifyFailure,
-  fetchSwapQuote,
-  isQuoteCancellation,
-  verifySwapQuote,
-  ZapQuoteError,
-} from "./fetchSwapQuote";
+import { fetchSwapQuote, isQuoteCancellation, verifySwapQuote, ZapQuoteError } from "./fetchSwapQuote";
 import { minAmountAfterSlippage } from "./slippage";
 import {
   buildZapQuoteRequestKey,
@@ -41,15 +35,7 @@ import DepositRouteMaterialImpactWarning from "./DepositRouteMaterialImpactWarni
 import { useDepositImpact } from "./useDepositImpact";
 import type { QuoteSnapshot } from "./useDepositImpact";
 import { getVaultSlippage, setVaultSlippage, resetVaultSlippage } from "../../lib/preferences";
-import { explorerAccountUrl } from "../../lib/networkEnv";
-import { useProtectedWalletAction } from "../../hooks/useProtectedWalletAction";
-import SessionExpiredRecovery from "../../components/wallet/SessionExpiredRecovery";
-import {
-  saveDepositDraft,
-  clearDepositDraft,
-  reconcileDepositDraft,
-  type DepositDraftState,
-} from "./depositDraft";
+import { apiFetch, apiUrl } from "../../lib/api";
 
 export interface ZapDepositPanelProps {
   walletAddress: string | null;
@@ -60,6 +46,12 @@ const MAX_SLIPPAGE = 15;
 const FALLBACK_SOURCE = "fallback_rate";
 const SUPPORT_URL = "https://github.com/edehvictor/StellarYield/issues";
 
+function explorerAccountUrl(walletAddress: string | null): string {
+  const passphrase = import.meta.env.VITE_NETWORK_PASSPHRASE ?? "";
+  const isMainnet = passphrase.includes("mainnet") || passphrase.includes("Public Global");
+  const base = `https://stellar.expert/explorer/${isMainnet ? "public" : "testnet"}`;
+  return walletAddress ? `${base}/account/${walletAddress}` : base;
+}
 
 export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps) {
   const useApiAssets = shouldLoadZapMetadataFromApi();
@@ -119,6 +111,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   const [quotePath, setQuotePath] = useState<string>("");
   const [quoteSource, setQuoteSource] = useState<string>("");
   const [quoteData, setQuoteData] = useState<ZapQuoteResponse | null>(null);
+  const [vaultPauseState, setVaultPauseState] = useState<ZapQuoteResponse["vaultPauseState"]>();
   const [feeDriftWarning, setFeeDriftWarning] = useState<FeeDriftWarning | null>(null);
   const [slippageTolerance, setSlippageTolerance] = useState(() =>
     getVaultSlippage(vaultContractId, settingsSlippage)
@@ -164,6 +157,26 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   const prevRouteRef = useRef<string[] | null>(null);
 
   const needsSwap = inputAsset?.contractId !== vaultToken.contractId;
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const response = await apiFetch(apiUrl("/api/zap/pause-state"));
+        if (!response.ok) return;
+        const payload = await response.json() as { vaultPauseState?: ZapQuoteResponse["vaultPauseState"] };
+        if (!cancelled && payload.vaultPauseState) setVaultPauseState(payload.vaultPauseState);
+      } catch {
+        if (!cancelled) setVaultPauseState({ status: "unknown", checkedAt: new Date().toISOString() });
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     prevExpectedOutRef.current = null;
@@ -253,6 +266,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         setQuotePath(q.path.map((h) => h.label ?? h.contractId.slice(0, 6)).join(" → "));
         setQuoteSource(q.source);
         setQuoteData(q);
+        if (q.vaultPauseState) setVaultPauseState(q.vaultPauseState);
         setQuoteNowMs(Date.now());
       }
     } catch (e) {
@@ -413,6 +427,18 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     setFailurePanic(undefined);
     setShowFailedModal(false);
     try {
+      const pauseResponse = await apiFetch(apiUrl("/api/zap/pause-state"));
+      if (pauseResponse.ok) {
+        const payload = await pauseResponse.json() as { vaultPauseState?: ZapQuoteResponse["vaultPauseState"] };
+        if (payload.vaultPauseState) {
+          setVaultPauseState(payload.vaultPauseState);
+          if (payload.vaultPauseState.status === "paused") {
+            setStatus("idle");
+            setError("The vault is paused. Deposits are temporarily unavailable.");
+            return;
+          }
+        }
+      }
       if (quoteData) {
         try {
           const isValid = await verifySwapQuote(quoteData);
@@ -762,6 +788,16 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         </div>
       )}
 
+      {vaultPauseState?.status === "paused" && (
+        <div className="mb-4 flex items-center gap-2 text-amber-200 text-sm bg-amber-500/10 border border-amber-500/30 rounded-lg p-3" role="status">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>Vault paused. Deposits are unavailable until it is resumed.</span>
+        </div>
+      )}
+      {vaultPauseState?.status === "unknown" && (
+        <div className="mb-4 text-gray-300 text-xs" role="status">Vault pause status could not be verified; the transaction may be rejected on-chain.</div>
+      )}
+
       <div className="bg-white/5 rounded-xl p-4 mb-2">
         <label className="text-sm text-gray-400 mb-2 block">You pay</label>
         <div className="flex gap-3">
@@ -1039,6 +1075,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         onClick={() => void handleZap()}
         disabled={
           !configOk ||
+          vaultPauseState?.status === "paused" ||
           !amount ||
           status === "loading" ||
           minOut === null ||

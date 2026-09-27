@@ -29,8 +29,11 @@ export interface ZapQuoteResponse {
   issuedAt: string;
   expiresAt: string;
   routeHash: string;
-  /** SHA-256 hex digest of the supported-assets payload (string on the wire). */
-  assetConfigVersion: string;
+  assetConfigVersion: number;
+  vaultPauseState?: {
+    status: "active" | "paused" | "unknown";
+    checkedAt: string;
+  };
 }
 
 /** Asset the user can select as zap input (Soroban SAC contract id). */

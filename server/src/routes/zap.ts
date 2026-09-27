@@ -9,8 +9,13 @@ import {
 import { sendError } from "../utils/errorResponse";
 import { validateZapQuote } from "../middleware/validation";
 import { recordFailure, resolveNetworkLabel } from "../monitoring/prometheus";
+import { getVaultPauseState } from "../services/vaultPauseStateService";
 
 const router = Router();
+
+router.get("/pause-state", async (_req: Request, res: Response) => {
+  res.json({ vaultPauseState: await getVaultPauseState() });
+});
 
 router.get("/supported-assets", (_req: Request, res: Response) => {
   try {
@@ -45,7 +50,10 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
           : undefined,
     };
 
-    const quote = await getZapQuote(body);
+    const [quote, vaultPauseState] = await Promise.all([
+      getZapQuote(body),
+      getVaultPauseState(),
+    ]);
     res.json({
       path: quote.path,
       expectedAmountOutStroops: quote.expectedAmountOutStroops,
@@ -60,7 +68,7 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       expiresAt: quote.expiresAt,
       routeHash: quote.routeHash,
       assetConfigVersion: quote.assetConfigVersion,
-      ...(quote.reserveCheck ? { reserveCheck: quote.reserveCheck } : {}),
+      vaultPauseState,
     });
   } catch (e) {
     recordFailure({
